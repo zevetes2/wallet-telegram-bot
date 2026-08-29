@@ -41,3 +41,22 @@ process.on('uncaughtException', (error) => {
 process.on('unhandledRejection', (reason) => {
     logger.error('❌ Promesa rechazada:', reason);
 });
+// ============================================================
+// SERVIDOR HTTP PARA RENDER (mantiene el puerto abierto)
+// ============================================================
+
+const express = require('express');
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+    res.send('🤖 Wallet Telegram Bot is running!');
+});
+
+app.get('/health', (req, res) => {
+    res.status(200).send('OK');
+});
+
+app.listen(port, () => {
+    console.log(`🌐 Web server running on port ${port}`);
+});
