@@ -139,19 +139,27 @@ Este bot te permite gestionar tus finanzas en Wallet by BudgetBakers directament
     📖 *Ayuda de Wallet Bot*
 
     *Agregar transacción:*
-    \`/add [monto] [categoría] [cuenta]\`
-    Ejemplos:
-    • \`/add 500 Motor Cash\` (sin espacios)
-    • \`/add 500 #Frutas y verduras @Emely Cash\` (con espacios)
-    • \`/add 500 "Frutas y verduras" "Emely Cash"\` (comillas)
+    \`/add [monto] [categoría] [cuenta] [opciones]\`
+
+    *Opciones:*
+    • \`#Categoría\` - Obligatorio (o entre comillas)
+    • \`@Cuenta\` - Opcional (por defecto la primera activa)
+    • \`date:YYYY-MM-DD\` - Fecha opcional (por defecto hoy)
+    • \`note:"Texto"\` - Nota opcional
+
+    *Ejemplos:*
+    • \`/add 500 #Motor @Cash\`
+    • \`/add 1500 #Supermercado date:2024-01-15\`
+    • \`/add 300 #Comida note:"Cena con amigos"\`
+    • \`/add 200 #Transporte @Crédito date:2024-01-20 note:"Viaje"\`
 
     *Múltiples transacciones:*
     \`/add 500 Motor Cash ; 200 #Comida @Cash\`
 
     *Buscar interactivamente:*
-    \`/autocomplete [texto]\` - Muestra categorías y cuentas que coinciden
+    \`/autocomplete [texto]\` - Muestra categorías y cuentas
 
-    *Comandos:*
+    *Otros comandos:*
     \`/list\` - Últimas 10 transacciones
     \`/summary\` - Resumen del mes actual
     \`/accounts\` - Lista de cuentas
@@ -323,12 +331,14 @@ Este bot te permite gestionar tus finanzas en Wallet by BudgetBakers directament
     }
 
     async processSingleTransaction(chatId, line, silent = false) {
-        // 🔧 Parser mejorado: soporta #categoría y @cuenta
+        // 🔧 Parser mejorado: soporta #categoría, @cuenta, date:, note:
         let amount = null;
         let categoryName = '';
         let accountName = '';
-        
-        // Primero intentar extraer el monto (primer número)
+        let dateStr = null;
+        let note = '';
+
+        // 1. Extraer el monto (primer número)
         const amountMatch = line.match(/^(\d+(?:\.\d+)?)/);
         if (!amountMatch) {
             throw new Error('Formato incorrecto: se necesita un monto (ej: 500)');
@@ -338,34 +348,52 @@ Este bot te permite gestionar tus finanzas en Wallet by BudgetBakers directament
             throw new Error('El monto debe ser un número positivo');
         }
         
-        // Remover el monto de la línea
+        // 2. Remover el monto
         let rest = line.substring(amountMatch[0].length).trim();
         
-        // Buscar #categoria y @cuenta
+        // 3. Extraer fecha (si existe)
+        const dateRegex = /date:\s*(\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4}|\d{2}-\d{2}-\d{4})/i;
+        const dateMatch = rest.match(dateRegex);
+        if (dateMatch) {
+            dateStr = dateMatch[1];
+            rest = rest.replace(dateMatch[0], '').trim();
+        }
+        
+        // 4. Extraer nota (si existe)
+        const noteRegex = /note:\s*(.+)/i;
+        const noteMatch = rest.match(noteRegex);
+        if (noteMatch) {
+            note = noteMatch[1].trim();
+            // Si la nota tiene comillas al inicio y final, quitarlas
+            if ((note.startsWith('"') && note.endsWith('"')) || (note.startsWith('"') && note.endsWith('"'))) {
+                note = note.substring(1, note.length - 1);
+            }
+            rest = rest.replace(noteMatch[0], '').trim();
+        }
+        
+        // 5. Extraer categoría y cuenta usando # y @
         const categoryMatch = rest.match(/#([^@]*?)(?=\s*@|\s*$)/);
         const accountMatch = rest.match(/@([^#]*?)(?=\s*#|\s*$)/);
         
         if (categoryMatch) {
             categoryName = categoryMatch[1].trim();
-            // Remover la parte de la categoría del resto
             rest = rest.replace(`#${categoryMatch[1]}`, '').trim();
         }
         
         if (accountMatch) {
             accountName = accountMatch[1].trim();
-            // Remover la parte de la cuenta del resto
             rest = rest.replace(`@${accountMatch[1]}`, '').trim();
         }
         
-        // Si no se encontraron prefijos, intentar parsear con el método antiguo (comillas o espacios)
-        if (!categoryName && !accountName) {
-            // Intentar con comillas
+        // 6. Si no se encontraron prefijos, intentar parsear con comillas o espacios (compatibilidad)
+        if (!categoryName && !accountName && rest) {
+            // Intentar con comillas (rectas y curvas)
             const args = [];
             let current = '';
             let inQuotes = false;
             for (let i = 0; i < rest.length; i++) {
                 const char = rest[i];
-                if (char === '"' || char === '"' || char === '"' || char === '"') { // comillas rectas y curvas
+                if (char === '"' || char === '"' || char === '"' || char === '"') {
                     inQuotes = !inQuotes;
                 } else if (char === ' ' && !inQuotes) {
                     if (current) {
@@ -386,26 +414,12 @@ Este bot te permite gestionar tus finanzas en Wallet by BudgetBakers directament
             }
         }
         
-        // Si aún no hay categoría, intentar adivinar: todo lo que queda es categoría
-        if (!categoryName && rest) {
-            // Si hay un @ sin #, asumir que lo que sigue al @ es cuenta y el resto categoría
-            const atIndex = rest.indexOf('@');
-            if (atIndex !== -1) {
-                categoryName = rest.substring(0, atIndex).trim();
-                const afterAt = rest.substring(atIndex + 1).trim();
-                if (afterAt) accountName = afterAt;
-            } else {
-                // Si solo hay un argumento, es categoría
-                categoryName = rest.trim();
-            }
-        }
-        
-        // Si no hay categoría, error
+        // 7. Si aún no hay categoría, error
         if (!categoryName) {
-            throw new Error('No se especificó categoría. Usa: /add 500 #Categoría @Cuenta');
+            throw new Error('No se especificó categoría. Usa: /add 500 #Categoría @Cuenta date:YYYY-MM-DD note:"Nota"');
         }
         
-        // Buscar categoría
+        // 8. Buscar categoría
         const categories = await this.wallet.getCategories({ refresh: true });
         let category = null;
         
@@ -428,14 +442,12 @@ Este bot te permite gestionar tus finanzas en Wallet by BudgetBakers directament
         }
         
         if (!category) {
-            // Sugerir categorías similares
             const suggestions = categories
                 .filter(c => c.group?.id !== 'incomes' && c.group?.id !== 'income')
                 .filter(c => c.name.toLowerCase().includes(categoryName.substring(0, 3).toLowerCase()))
                 .slice(0, 5)
                 .map(c => `#${c.name}`)
                 .join(', ');
-            
             throw new Error(
                 `No se encontró la categoría "${categoryName}".\n` +
                 `${suggestions ? `💡 ¿Quisiste decir: ${suggestions}?` : ''}\n` +
@@ -443,10 +455,10 @@ Este bot te permite gestionar tus finanzas en Wallet by BudgetBakers directament
             );
         }
         
-        // 🔧 Obtener label de la categoría
+        // 9. Obtener label de la categoría
         const labelName = getLabelForCategory(category.name);
         
-        // Buscar cuenta
+        // 10. Buscar cuenta
         const accounts = await this.wallet.getAccounts();
         let account = null;
         
@@ -475,29 +487,56 @@ Este bot te permite gestionar tus finanzas en Wallet by BudgetBakers directament
             }
         }
         
-        // Crear transacción
+        // 11. Procesar fecha
+        let targetDate = null;
+        if (dateStr) {
+            // Intentar parsear diferentes formatos
+            let parsedDate = null;
+            // YYYY-MM-DD
+            let match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+            if (match) {
+                parsedDate = new Date(parseInt(match[1]), parseInt(match[2])-1, parseInt(match[3]));
+            } else {
+                // DD/MM/YYYY o DD-MM-YYYY
+                match = dateStr.match(/^(\d{2})[\/-](\d{2})[\/-](\d{4})$/);
+                if (match) {
+                    parsedDate = new Date(parseInt(match[3]), parseInt(match[2])-1, parseInt(match[1]));
+                }
+            }
+            if (parsedDate && !isNaN(parsedDate.getTime())) {
+                targetDate = parsedDate;
+            } else {
+                throw new Error(`Formato de fecha inválido: "${dateStr}". Usa YYYY-MM-DD o DD/MM/YYYY.`);
+            }
+        }
+        
+        // 12. Crear transacción
         const result = await this.wallet.createTransactionSimple({
             amount: amount,
             categoryId: category.id,
             accountId: account.id,
-            note: `Agregado desde Telegram: ${categoryName}`,
+            note: note || `Agregado desde Telegram: ${categoryName}`,
             counterParty: 'Telegram Bot',
             labelName: labelName,
+            date: targetDate || new Date(), // Si no hay fecha, usar hoy
         });
         
         const transId = result.id || result.record?.id || 'N/A';
-        const details = `💰 ${Number(amount).toFixed(2)} DOP | 📂 ${category.name} | 🏷️ ${labelName}`;
+        const dateDisplay = targetDate ? targetDate.toISOString().split('T')[0] : 'hoy';
+        const details = `💰 ${Number(amount).toFixed(2)} DOP | 📂 ${category.name} | 🏷️ ${labelName} | 📅 ${dateDisplay}`;
         
         if (!silent) {
-            await this.bot.sendMessage(chatId, 
-                `✅ *Transacción agregada!*\n\n` +
+            let responseMsg = `✅ *Transacción agregada!*\n\n` +
                 `💰 Monto: ${Number(amount).toFixed(2)} DOP\n` +
                 `📂 Categoría: ${category.name}\n` +
                 `🏷️ Label: ${labelName}\n` +
                 `🏦 Cuenta: ${account.name}\n` +
-                `🆔 ID: ${transId}`,
-                { parse_mode: 'Markdown' }
-            );
+                `📅 Fecha: ${dateDisplay}`;
+            if (note) {
+                responseMsg += `\n📝 Nota: ${note}`;
+            }
+            responseMsg += `\n🆔 ID: ${transId}`;
+            await this.bot.sendMessage(chatId, responseMsg, { parse_mode: 'Markdown' });
         }
         
         return { 
@@ -507,7 +546,9 @@ Este bot te permite gestionar tus finanzas en Wallet by BudgetBakers directament
             category: category.name,
             label: labelName,
             account: account.name,
-            amount: amount
+            amount: amount,
+            date: dateDisplay,
+            note: note
         };
     }
 
