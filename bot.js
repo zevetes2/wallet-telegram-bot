@@ -6,6 +6,45 @@ const TelegramBot = require('node-telegram-bot-api');
 const WalletAPI = require('./wallet-api');
 const logger = require('./utils/logger');
 
+
+// ============================================================
+// BOTONES Y MENÚS
+// ============================================================
+
+// Emojis para el menú principal
+const MENU_EMOJIS = {
+    add: '💰',
+    summary: '📊',
+    accounts: '🏦',
+    categories: '📂',
+    list: '📋',
+    cancel: '❌',
+    back: '⬅️',
+    confirm: '✅',
+    next: '➡️',
+    prev: '⬅️'
+};
+
+// Teclado personalizado del menú principal
+const MAIN_MENU_KEYBOARD = {
+    keyboard: [
+        [
+            { text: '💰 Agregar Gasto' },
+            { text: '📊 Resumen Mes' }
+        ],
+        [
+            { text: '🏦 Cuentas' },
+            { text: '📂 Categorías' }
+        ],
+        [
+            { text: '📋 Últimos Gastos' },
+            { text: '❌ Cancelar' }
+        ]
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false
+};
+
 // ============================================================
 // MAPEO DE CATEGORÍAS A LABELS (SOLO LOS 7 LABELS)
 // ============================================================
@@ -90,10 +129,18 @@ class WalletBot {
         this.bot.onText(/\/buscar(?:\s+(.+))?/, (msg, match) => this.handleSearch(msg, match));
         this.bot.onText(/\/allaccounts/, (msg) => this.handleAllAccounts(msg));
         this.bot.onText(/\/autocomplete(?:\s+(.+))?/, (msg, match) => this.handleAutocomplete(msg, match));
+        this.bot.onText(/\/menu/, (msg) => this.handleMenu(msg));
 
+        // Manejar mensajes del teclado personalizado
         this.bot.on('message', (msg) => {
-            if (!msg.text || msg.text.startsWith('/')) return;
-            this.handleConversation(msg);
+            if (!msg.text) return;
+            if (msg.text.startsWith('/')) return;
+            this.handleKeyboardMessage(msg);
+        });
+
+        // Manejar callbacks de botones inline
+        this.bot.on('callback_query', (callbackQuery) => {
+            this.handleCallbackQuery(callbackQuery);
         });
 
         this.bot.on('error', (error) => {
@@ -111,26 +158,77 @@ class WalletBot {
         const chatId = msg.chat.id;
         const firstName = msg.from.first_name || 'usuario';
         
-        const welcomeMessage = `
-🎯 *Bienvenido a Wallet Bot, ${firstName}!*
+        await this.bot.sendMessage(chatId, 
+            `🎯 *Bienvenido a Wallet Bot, ${firstName}!*\n\n` +
+            `Selecciona una opción del menú o usa los comandos:\n` +
+            `\`/help\` para ver todos los comandos disponibles.`,
+            { 
+                parse_mode: 'Markdown',
+                reply_markup: MAIN_MENU_KEYBOARD 
+            }
+        );
+    }
 
-Este bot te permite gestionar tus finanzas en Wallet by BudgetBakers directamente desde Telegram.
+    async handleMenu(msg) {
+        const chatId = msg.chat.id;
+        await this.bot.sendMessage(chatId, 
+            `📋 *Menú Principal*\n\nSelecciona una opción:`,
+            { 
+                parse_mode: 'Markdown',
+                reply_markup: MAIN_MENU_KEYBOARD 
+            }
+        );
+    }
 
-📋 *Comandos disponibles:*
-
-💳 \`/add [monto] [categoría] [cuenta]\` - Agregar transacción
-📊 \`/list\` - Ver transacciones recientes
-📈 \`/summary\` - Resumen del mes actual
-🏦 \`/accounts\` - Listar cuentas
-📂 \`/categories\` - Listar categorías
-❌ \`/cancel\` - Cancelar operación en curso
-ℹ️ \`/help\` - Mostrar esta ayuda
-
-💡 *Ejemplos:*
-\`/add 500 Comida CuentaPrincipal\`
-`;
-
-        await this.bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown' });
+    async handleKeyboardMessage(msg) {
+        const chatId = msg.chat.id;
+        const text = msg.text;
+        
+        // Si el usuario está en medio de una conversación, no interferir
+        if (this.userStates.has(chatId)) {
+            await this.handleConversation(msg);
+            return;
+        }
+        
+        // Manejar selecciones del menú
+        if (text.includes('Agregar Gasto')) {
+            // Iniciar flujo de agregar gasto
+            this.userStates.set(chatId, { step: 'add_amount' });
+            await this.bot.sendMessage(chatId, 
+                '💸 *Agregar gasto*\n\n' +
+                '1️⃣ ¿Cuánto? (ej: 1500.50)',
+                { parse_mode: 'Markdown' }
+            );
+            return;
+        }
+        
+        if (text.includes('Resumen Mes')) {
+            await this.handleSummary(msg);
+            return;
+        }
+        
+        if (text.includes('Cuentas')) {
+            await this.handleAccounts(msg);
+            return;
+        }
+        
+        if (text.includes('Categorías')) {
+            await this.handleCategories(msg);
+            return;
+        }
+        
+        if (text.includes('Últimos Gastos')) {
+            await this.handleList(msg);
+            return;
+        }
+        
+        if (text.includes('Cancelar')) {
+            await this.handleCancel(msg);
+            return;
+        }
+        
+        // Si no es un comando del menú, pasarlo a la conversación
+        await this.handleConversation(msg);
     }
 
     async handleHelp(msg) {
@@ -765,6 +863,7 @@ Este bot te permite gestionar tus finanzas en Wallet by BudgetBakers directament
         const step = state.step;
 
         try {
+            // En handleConversation, en el paso 'add_amount':
             if (step === 'add_amount') {
                 const amount = parseFloat(text.replace(',', '.'));
                 if (isNaN(amount) || amount <= 0) {
@@ -773,21 +872,14 @@ Este bot te permite gestionar tus finanzas en Wallet by BudgetBakers directament
                 }
                 
                 state.amount = amount;
-                state.step = 'add_category';
+                state.step = 'select_category';
                 this.userStates.set(chatId, state);
                 
-                const categories = await this.wallet.getCategories();
-                const expenseCats = categories.filter(c => c.group?.id !== 'incomes');
-                const suggestions = expenseCats.slice(0, 5).map(c => c.name).join(', ');
-                
-                await this.bot.sendMessage(chatId, 
-                    `✅ Monto: ${Number(amount).toFixed(2)} DOP\n\n` +
-                    `2️⃣ ¿Categoría?\n` +
-                    `Ejemplos: ${suggestions}\n` +
-                    `O escribe el nombre de una categoría.`
-                );
+                // Mostrar botones de categorías
+                await this.showCategoryButtons(chatId);
                 return;
             }
+
 
             if (step === 'add_category') {
                 // Obtener todas las categorías (sin cache)
@@ -903,6 +995,42 @@ Este bot te permite gestionar tus finanzas en Wallet by BudgetBakers directament
 
                 this.userStates.delete(chatId);
             }
+
+            // En handleConversation, para búsqueda de categoría:
+            if (step === 'search_category') {
+                const searchTerm = text.toLowerCase();
+                const categories = await this.wallet.getCategories({ refresh: true });
+                const results = categories
+                    .filter(c => c.group?.id !== 'incomes' && c.group?.id !== 'income')
+                    .filter(c => c.name.toLowerCase().includes(searchTerm))
+                    .slice(0, 10);
+                
+                if (results.length === 0) {
+                    await this.bot.sendMessage(chatId, `🔍 No encontré categorías con "${text}"`);
+                    return;
+                }
+                
+                const inlineKeyboard = results.map(c => [{
+                    text: `📂 ${c.name}`,
+                    callback_data: `cat_${c.id}_0`
+                }]);
+                inlineKeyboard.push([{ text: '❌ Cancelar', callback_data: 'cancel' }]);
+                
+                await this.bot.sendMessage(chatId, 
+                    `🔍 *Resultados para "${text}":*\n\nSelecciona una categoría:`,
+                    {
+                        parse_mode: 'Markdown',
+                        reply_markup: { inline_keyboard: inlineKeyboard }
+                    }
+                );
+                return;
+            }
+
+            // Similar para búsqueda de cuenta
+            if (step === 'search_account') {
+                // Implementación similar a search_category
+            }
+
         } catch (error) {
             logger.error('Error en conversación:', error);
             await this.bot.sendMessage(chatId, 
@@ -1026,6 +1154,385 @@ Este bot te permite gestionar tus finanzas en Wallet by BudgetBakers directament
             logger.error('Error en autocomplete:', error);
             await this.bot.sendMessage(chatId, `❌ Error: ${error.message}`);
         }
+    }
+    // ============================================================
+    // BOTONES INLINE PARA CATEGORÍAS Y CUENTAS
+    // ============================================================
+
+    async showCategoryButtons(chatId, page = 0, selectedCategory = null) {
+        const categories = await this.wallet.getCategories({ refresh: true });
+        const expenseCats = categories
+            .filter(c => c.group?.id !== 'incomes' && c.group?.id !== 'income')
+            .sort((a, b) => a.name.localeCompare(b.name));
+        
+        const perPage = 8;
+        const totalPages = Math.ceil(expenseCats.length / perPage);
+        const start = page * perPage;
+        const end = Math.min(start + perPage, expenseCats.length);
+        const pageCats = expenseCats.slice(start, end);
+        
+        const inlineKeyboard = [];
+        
+        // Botones de categorías
+        for (const cat of pageCats) {
+            const isSelected = selectedCategory === cat.id;
+            inlineKeyboard.push([{
+                text: `${isSelected ? '✅ ' : ''}📂 ${cat.name}`,
+                callback_data: `cat_${cat.id}_${page}`
+            }]);
+        }
+        
+        // Botones de navegación
+        const navButtons = [];
+        if (page > 0) {
+            navButtons.push({
+                text: '⬅️ Anterior',
+                callback_data: `catpage_${page - 1}`
+            });
+        }
+        navButtons.push({
+            text: `📄 ${page + 1}/${totalPages}`,
+            callback_data: 'noop'
+        });
+        if (page < totalPages - 1) {
+            navButtons.push({
+                text: 'Siguiente ➡️',
+                callback_data: `catpage_${page + 1}`
+            });
+        }
+        if (navButtons.length > 0) {
+            inlineKeyboard.push(navButtons);
+        }
+        
+        // Botón de acción
+        inlineKeyboard.push([
+            { text: '🔍 Buscar categoría', callback_data: 'search_category' },
+            { text: '❌ Cancelar', callback_data: 'cancel' }
+        ]);
+        
+        const message = `📂 *Selecciona una categoría:*\n\n` +
+            `Mostrando ${start + 1}-${Math.min(end, expenseCats.length)} de ${expenseCats.length} categorías`;
+        
+        const sent = await this.bot.sendMessage(chatId, message, {
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: inlineKeyboard }
+        });
+        
+        return sent;
+    }
+
+    async showAccountButtons(chatId, page = 0, selectedAccount = null) {
+        const accounts = await this.wallet.getAccounts({ refresh: true });
+        const activeAccounts = accounts
+            .filter(a => !a.archived)
+            .sort((a, b) => a.name.localeCompare(b.name));
+        
+        const perPage = 8;
+        const totalPages = Math.ceil(activeAccounts.length / perPage);
+        const start = page * perPage;
+        const end = Math.min(start + perPage, activeAccounts.length);
+        const pageAccounts = activeAccounts.slice(start, end);
+        
+        const inlineKeyboard = [];
+        
+        for (const acc of pageAccounts) {
+            const isSelected = selectedAccount === acc.id;
+            const balance = acc.balance?.currentBalance || acc.balance?.rawCurrentBalance || 0;
+            inlineKeyboard.push([{
+                text: `${isSelected ? '✅ ' : ''}🏦 ${acc.name} (${Number(balance).toFixed(2)} ${acc.currencyCode || 'DOP'})`,
+                callback_data: `acc_${acc.id}_${page}`
+            }]);
+        }
+        
+        const navButtons = [];
+        if (page > 0) {
+            navButtons.push({
+                text: '⬅️ Anterior',
+                callback_data: `accpage_${page - 1}`
+            });
+        }
+        navButtons.push({
+            text: `📄 ${page + 1}/${totalPages}`,
+            callback_data: 'noop'
+        });
+        if (page < totalPages - 1) {
+            navButtons.push({
+                text: 'Siguiente ➡️',
+                callback_data: `accpage_${page + 1}`
+            });
+        }
+        if (navButtons.length > 0) {
+            inlineKeyboard.push(navButtons);
+        }
+        
+        inlineKeyboard.push([
+            { text: '🔍 Buscar cuenta', callback_data: 'search_account' },
+            { text: '❌ Cancelar', callback_data: 'cancel' }
+        ]);
+        
+        const message = `🏦 *Selecciona una cuenta:*\n\n` +
+            `Mostrando ${start + 1}-${Math.min(end, activeAccounts.length)} de ${activeAccounts.length} cuentas`;
+        
+        const sent = await this.bot.sendMessage(chatId, message, {
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: inlineKeyboard }
+        });
+        
+        return sent;
+    }
+    // ============================================================
+    // MANEJO DE CALLBACKS (Botones Inline)
+    // ============================================================
+
+    async handleCallbackQuery(callbackQuery) {
+        const chatId = callbackQuery.message.chat.id;
+        const data = callbackQuery.data;
+        const messageId = callbackQuery.message.message_id;
+        
+        try {
+            // Cancelar
+            if (data === 'cancel') {
+                await this.bot.editMessageText('❌ Operación cancelada.', {
+                    chat_id: chatId,
+                    message_id: messageId
+                });
+                await this.bot.answerCallbackQuery(callbackQuery.id);
+                this.userStates.delete(chatId);
+                // Mostrar menú principal
+                await this.showMainMenu(chatId);
+                return;
+            }
+            
+            // No operation (para botones de navegación)
+            if (data === 'noop') {
+                await this.bot.answerCallbackQuery(callbackQuery.id);
+                return;
+            }
+            
+            // Navegación de páginas de categorías
+            if (data.startsWith('catpage_')) {
+                const page = parseInt(data.split('_')[1]);
+                await this.bot.editMessageReplyMarkup({
+                    inline_keyboard: (await this.getCategoryKeyboard(page)).inline_keyboard
+                }, {
+                    chat_id: chatId,
+                    message_id: messageId
+                });
+                await this.bot.answerCallbackQuery(callbackQuery.id);
+                return;
+            }
+            
+            // Navegación de páginas de cuentas
+            if (data.startsWith('accpage_')) {
+                const page = parseInt(data.split('_')[1]);
+                await this.bot.editMessageReplyMarkup({
+                    inline_keyboard: (await this.getAccountKeyboard(page)).inline_keyboard
+                }, {
+                    chat_id: chatId,
+                    message_id: messageId
+                });
+                await this.bot.answerCallbackQuery(callbackQuery.id);
+                return;
+            }
+            
+            // Selección de categoría
+            if (data.startsWith('cat_')) {
+                const parts = data.split('_');
+                const categoryId = parts[1];
+                const page = parseInt(parts[2] || 0);
+                
+                const categories = await this.wallet.getCategories({ refresh: true });
+                const category = categories.find(c => c.id === categoryId);
+                
+                if (category) {
+                    // Guardar categoría seleccionada en el estado
+                    const state = this.userStates.get(chatId) || {};
+                    state.category = category;
+                    state.categoryId = categoryId;
+                    this.userStates.set(chatId, state);
+                    
+                    // Actualizar mensaje mostrando selección
+                    await this.bot.editMessageText(
+                        `✅ *Categoría seleccionada:* ${category.name}\n\n` +
+                        `Ahora selecciona una cuenta:`,
+                        {
+                            chat_id: chatId,
+                            message_id: messageId,
+                            parse_mode: 'Markdown'
+                        }
+                    );
+                    
+                    // Mostrar cuentas
+                    await this.showAccountButtons(chatId);
+                }
+                
+                await this.bot.answerCallbackQuery(callbackQuery.id);
+                return;
+            }
+            
+            // Selección de cuenta
+            if (data.startsWith('acc_')) {
+                const parts = data.split('_');
+                const accountId = parts[1];
+                
+                const accounts = await this.wallet.getAccounts({ refresh: true });
+                const account = accounts.find(a => a.id === accountId);
+                
+                if (account) {
+                    const state = this.userStates.get(chatId) || {};
+                    state.account = account;
+                    state.accountId = accountId;
+                    this.userStates.set(chatId, state);
+                    
+                    // Mostrar resumen y confirmación
+                    const amount = state.amount || 0;
+                    const category = state.category || { name: 'Sin categoría' };
+                    
+                    const confirmKeyboard = {
+                        inline_keyboard: [
+                            [
+                                { text: '✅ Confirmar', callback_data: 'confirm_transaction' },
+                                { text: '❌ Cancelar', callback_data: 'cancel' }
+                            ]
+                        ]
+                    };
+                    
+                    await this.bot.editMessageText(
+                        `📋 *Resumen de transacción*\n\n` +
+                        `💰 Monto: ${Number(amount).toFixed(2)} DOP\n` +
+                        `📂 Categoría: ${category.name}\n` +
+                        `🏦 Cuenta: ${account.name}\n\n` +
+                        `¿Confirmas esta transacción?`,
+                        {
+                            chat_id: chatId,
+                            message_id: messageId,
+                            parse_mode: 'Markdown',
+                            reply_markup: confirmKeyboard
+                        }
+                    );
+                }
+                
+                await this.bot.answerCallbackQuery(callbackQuery.id);
+                return;
+            }
+            
+            // Confirmar transacción
+            if (data === 'confirm_transaction') {
+                const state = this.userStates.get(chatId);
+                if (!state || !state.amount || !state.category || !state.account) {
+                    await this.bot.editMessageText('❌ Error: datos incompletos.', {
+                        chat_id: chatId,
+                        message_id: messageId
+                    });
+                    await this.bot.answerCallbackQuery(callbackQuery.id);
+                    return;
+                }
+                
+                try {
+                    const result = await this.wallet.createTransactionSimple({
+                        amount: state.amount,
+                        categoryId: state.category.id,
+                        accountId: state.account.id,
+                        note: `Agregado desde el menú: ${state.category.name}`,
+                        counterParty: 'Telegram Bot',
+                        labelName: getLabelForCategory(state.category.name),
+                        date: state.date || new Date()
+                    });
+                    
+                    const transId = result.id || result.record?.id || 'N/A';
+                    await this.bot.editMessageText(
+                        `✅ *Transacción agregada exitosamente!*\n\n` +
+                        `💰 Monto: ${Number(state.amount).toFixed(2)} DOP\n` +
+                        `📂 Categoría: ${state.category.name}\n` +
+                        `🏦 Cuenta: ${state.account.name}\n` +
+                        `🆔 ID: ${transId}`,
+                        {
+                            chat_id: chatId,
+                            message_id: messageId,
+                            parse_mode: 'Markdown'
+                        }
+                    );
+                    
+                    this.userStates.delete(chatId);
+                    
+                    // Mostrar menú principal después de unos segundos
+                    setTimeout(async () => {
+                        await this.showMainMenu(chatId);
+                    }, 2000);
+                    
+                } catch (error) {
+                    await this.bot.editMessageText(`❌ Error: ${error.message}`, {
+                        chat_id: chatId,
+                        message_id: messageId
+                    });
+                }
+                
+                await this.bot.answerCallbackQuery(callbackQuery.id);
+                return;
+            }
+            
+            // Búsqueda de categoría (placeholder)
+            if (data === 'search_category') {
+                await this.bot.editMessageText(
+                    `🔍 *Buscar categoría*\n\n` +
+                    `Escribe el nombre de la categoría que buscas.\n` +
+                    `Ejemplo: "Motor" o "Comida"`,
+                    {
+                        chat_id: chatId,
+                        message_id: messageId,
+                        parse_mode: 'Markdown'
+                    }
+                );
+                // Guardar estado para búsqueda
+                const state = this.userStates.get(chatId) || {};
+                state.step = 'search_category';
+                this.userStates.set(chatId, state);
+                await this.bot.answerCallbackQuery(callbackQuery.id);
+                return;
+            }
+            
+            // Búsqueda de cuenta (placeholder)
+            if (data === 'search_account') {
+                await this.bot.editMessageText(
+                    `🔍 *Buscar cuenta*\n\n` +
+                    `Escribe el nombre de la cuenta que buscas.\n` +
+                    `Ejemplo: "Cash" o "Tarjeta"`,
+                    {
+                        chat_id: chatId,
+                        message_id: messageId,
+                        parse_mode: 'Markdown'
+                    }
+                );
+                const state = this.userStates.get(chatId) || {};
+                state.step = 'search_account';
+                this.userStates.set(chatId, state);
+                await this.bot.answerCallbackQuery(callbackQuery.id);
+                return;
+            }
+            
+            // Default
+            await this.bot.answerCallbackQuery(callbackQuery.id, {
+                text: '⚠️ Opción no disponible',
+                show_alert: true
+            });
+            
+        } catch (error) {
+            console.error('Error en callback_query:', error);
+            await this.bot.answerCallbackQuery(callbackQuery.id, {
+                text: '❌ Error al procesar',
+                show_alert: true
+            });
+        }
+    }
+
+    async showMainMenu(chatId) {
+        await this.bot.sendMessage(chatId, 
+            `📋 *Menú Principal*\n\nSelecciona una opción:`,
+            { 
+                parse_mode: 'Markdown',
+                reply_markup: MAIN_MENU_KEYBOARD 
+            }
+        );
     }
 }
 
