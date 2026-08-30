@@ -89,6 +89,7 @@ class WalletBot {
         this.bot.onText(/\/cancel/, (msg) => this.handleCancel(msg));
         this.bot.onText(/\/buscar(?:\s+(.+))?/, (msg, match) => this.handleSearch(msg, match));
         this.bot.onText(/\/allaccounts/, (msg) => this.handleAllAccounts(msg));
+        this.bot.onText(/\/autocomplete(?:\s+(.+))?/, (msg, match) => this.handleAutocomplete(msg, match));
 
         this.bot.on('message', (msg) => {
             if (!msg.text || msg.text.startsWith('/')) return;
@@ -135,22 +136,28 @@ Este bot te permite gestionar tus finanzas en Wallet by BudgetBakers directament
     async handleHelp(msg) {
         const chatId = msg.chat.id;
         const helpMessage = `
-📖 *Ayuda de Wallet Bot*
+    📖 *Ayuda de Wallet Bot*
 
-*Agregar transacción:*
-\`/add [monto] [categoría] [cuenta]\`
-Ejemplo: \`/add 1500 Supermercado CuentaCorriente\`
+    *Agregar transacción:*
+    \`/add [monto] [categoría] [cuenta]\`
+    Ejemplos:
+    • \`/add 500 Motor Cash\` (sin espacios)
+    • \`/add 500 #Frutas y verduras @Emely Cash\` (con espacios)
+    • \`/add 500 "Frutas y verduras" "Emely Cash"\` (comillas)
 
-*Si no especificas cuenta o categoría*, el bot te pedirá que las selecciones.
+    *Múltiples transacciones:*
+    \`/add 500 Motor Cash ; 200 #Comida @Cash\`
 
-*Comandos:*
-\`/list\` - Últimas 10 transacciones
-\`/summary\` - Resumen del mes actual
-\`/accounts\` - Lista de cuentas
-\`/categories\` - Lista de categorías
-\`/cancel\` - Cancelar operación
-`;
+    *Buscar interactivamente:*
+    \`/autocomplete [texto]\` - Muestra categorías y cuentas que coinciden
 
+    *Comandos:*
+    \`/list\` - Últimas 10 transacciones
+    \`/summary\` - Resumen del mes actual
+    \`/accounts\` - Lista de cuentas
+    \`/categories\` - Lista de categorías
+    \`/cancel\` - Cancelar operación
+    `;
         await this.bot.sendMessage(chatId, helpMessage, { parse_mode: 'Markdown' });
     }
 
@@ -316,86 +323,92 @@ Ejemplo: \`/add 1500 Supermercado CuentaCorriente\`
     }
 
     async processSingleTransaction(chatId, line, silent = false) {
-        // 🔧 Parser mejorado: maneja comillas correctamente
-        const args = [];
-        let current = '';
-        let inQuotes = false;
-        
-        for (let i = 0; i < line.length; i++) {
-            const char = line[i];
-            if (char === '"') {
-                inQuotes = !inQuotes;
-            } else if (char === ' ' && !inQuotes) {
-                if (current) {
-                    args.push(current);
-                    current = '';
-                }
-            } else {
-                current += char;
-            }
-        }
-        if (current) args.push(current);
-        
-        if (args.length < 1) {
-            throw new Error('Formato incorrecto: se necesita un monto');
-        }
-        
-        const amount = parseFloat(args[0].replace(',', '.'));
-        if (isNaN(amount) || amount <= 0) {
-            throw new Error('El monto debe ser un número positivo');
-        }
-
-        // Extraer categoría y cuenta
+        // 🔧 Parser mejorado: soporta #categoría y @cuenta
+        let amount = null;
         let categoryName = '';
         let accountName = '';
         
-        const accounts = await this.wallet.getAccounts();
-        const activeAccounts = accounts.filter(a => !a.archived);
-        const accountNames = activeAccounts.map(a => a.name.toLowerCase());
-
-        if (args.length >= 2) {
-            let foundAccount = null;
-            let accountIndex = -1;
-            
-            for (let i = args.length - 1; i >= 1; i--) {
-                const possibleAccount = args.slice(i).join(' ');
-                if (accountNames.some(name => name === possibleAccount.toLowerCase())) {
-                    foundAccount = possibleAccount;
-                    accountIndex = i;
-                    break;
-                }
-            }
-            
-            if (!foundAccount) {
-                for (let i = args.length - 1; i >= 1; i--) {
-                    const possibleAccount = args.slice(i).join(' ');
-                    if (accountNames.some(name => name.includes(possibleAccount.toLowerCase()) || possibleAccount.toLowerCase().includes(name))) {
-                        foundAccount = possibleAccount;
-                        accountIndex = i;
-                        break;
+        // Primero intentar extraer el monto (primer número)
+        const amountMatch = line.match(/^(\d+(?:\.\d+)?)/);
+        if (!amountMatch) {
+            throw new Error('Formato incorrecto: se necesita un monto (ej: 500)');
+        }
+        amount = parseFloat(amountMatch[1]);
+        if (isNaN(amount) || amount <= 0) {
+            throw new Error('El monto debe ser un número positivo');
+        }
+        
+        // Remover el monto de la línea
+        let rest = line.substring(amountMatch[0].length).trim();
+        
+        // Buscar #categoria y @cuenta
+        const categoryMatch = rest.match(/#([^@]*?)(?=\s*@|\s*$)/);
+        const accountMatch = rest.match(/@([^#]*?)(?=\s*#|\s*$)/);
+        
+        if (categoryMatch) {
+            categoryName = categoryMatch[1].trim();
+            // Remover la parte de la categoría del resto
+            rest = rest.replace(`#${categoryMatch[1]}`, '').trim();
+        }
+        
+        if (accountMatch) {
+            accountName = accountMatch[1].trim();
+            // Remover la parte de la cuenta del resto
+            rest = rest.replace(`@${accountMatch[1]}`, '').trim();
+        }
+        
+        // Si no se encontraron prefijos, intentar parsear con el método antiguo (comillas o espacios)
+        if (!categoryName && !accountName) {
+            // Intentar con comillas
+            const args = [];
+            let current = '';
+            let inQuotes = false;
+            for (let i = 0; i < rest.length; i++) {
+                const char = rest[i];
+                if (char === '"' || char === '"' || char === '"' || char === '"') { // comillas rectas y curvas
+                    inQuotes = !inQuotes;
+                } else if (char === ' ' && !inQuotes) {
+                    if (current) {
+                        args.push(current);
+                        current = '';
                     }
+                } else {
+                    current += char;
                 }
             }
+            if (current) args.push(current);
             
-            if (foundAccount && accountIndex > 1) {
-                accountName = foundAccount;
-                categoryName = args.slice(1, accountIndex).join(' ');
-            } else if (foundAccount && accountIndex === 1) {
-                accountName = foundAccount;
-                categoryName = '';
-            } else {
-                categoryName = args.slice(1).join(' ');
+            if (args.length >= 1) {
+                categoryName = args[0];
+                if (args.length >= 2) {
+                    accountName = args.slice(1).join(' ');
+                }
             }
         }
-
-        if (!categoryName) {
-            throw new Error('No se especificó categoría');
+        
+        // Si aún no hay categoría, intentar adivinar: todo lo que queda es categoría
+        if (!categoryName && rest) {
+            // Si hay un @ sin #, asumir que lo que sigue al @ es cuenta y el resto categoría
+            const atIndex = rest.indexOf('@');
+            if (atIndex !== -1) {
+                categoryName = rest.substring(0, atIndex).trim();
+                const afterAt = rest.substring(atIndex + 1).trim();
+                if (afterAt) accountName = afterAt;
+            } else {
+                // Si solo hay un argumento, es categoría
+                categoryName = rest.trim();
+            }
         }
-
+        
+        // Si no hay categoría, error
+        if (!categoryName) {
+            throw new Error('No se especificó categoría. Usa: /add 500 #Categoría @Cuenta');
+        }
+        
         // Buscar categoría
         const categories = await this.wallet.getCategories({ refresh: true });
         let category = null;
-
+        
         // Coincidencia exacta
         category = categories.find(c => 
             c.name && c.name.toLowerCase() === categoryName.toLowerCase()
@@ -413,16 +426,30 @@ Ejemplo: \`/add 1500 Supermercado CuentaCorriente\`
                 c.group.name.toLowerCase().includes(categoryName.toLowerCase())
             );
         }
-
+        
         if (!category) {
-            throw new Error(`No se encontró la categoría "${categoryName}"`);
+            // Sugerir categorías similares
+            const suggestions = categories
+                .filter(c => c.group?.id !== 'incomes' && c.group?.id !== 'income')
+                .filter(c => c.name.toLowerCase().includes(categoryName.substring(0, 3).toLowerCase()))
+                .slice(0, 5)
+                .map(c => `#${c.name}`)
+                .join(', ');
+            
+            throw new Error(
+                `No se encontró la categoría "${categoryName}".\n` +
+                `${suggestions ? `💡 ¿Quisiste decir: ${suggestions}?` : ''}\n` +
+                `💡 Usa /autocomplete [texto] para buscar interactivamente.`
+            );
         }
-
-        // 🔧 Obtener label de la categoría usando el mapeo
+        
+        // 🔧 Obtener label de la categoría
         const labelName = getLabelForCategory(category.name);
-
+        
         // Buscar cuenta
+        const accounts = await this.wallet.getAccounts();
         let account = null;
+        
         if (accountName) {
             account = accounts.find(a => 
                 a.name && a.name.toLowerCase() === accountName.toLowerCase()
@@ -433,7 +460,7 @@ Ejemplo: \`/add 1500 Supermercado CuentaCorriente\`
                 );
             }
         }
-
+        
         if (!account) {
             const activeAccounts = accounts.filter(a => !a.archived);
             if (activeAccounts.length > 0) {
@@ -447,7 +474,7 @@ Ejemplo: \`/add 1500 Supermercado CuentaCorriente\`
                 throw new Error('No hay cuentas disponibles');
             }
         }
-
+        
         // Crear transacción
         const result = await this.wallet.createTransactionSimple({
             amount: amount,
@@ -457,10 +484,10 @@ Ejemplo: \`/add 1500 Supermercado CuentaCorriente\`
             counterParty: 'Telegram Bot',
             labelName: labelName,
         });
-
+        
         const transId = result.id || result.record?.id || 'N/A';
         const details = `💰 ${Number(amount).toFixed(2)} DOP | 📂 ${category.name} | 🏷️ ${labelName}`;
-
+        
         if (!silent) {
             await this.bot.sendMessage(chatId, 
                 `✅ *Transacción agregada!*\n\n` +
@@ -472,7 +499,7 @@ Ejemplo: \`/add 1500 Supermercado CuentaCorriente\`
                 { parse_mode: 'Markdown' }
             );
         }
-
+        
         return { 
             success: true, 
             details, 
@@ -897,7 +924,68 @@ Ejemplo: \`/add 1500 Supermercado CuentaCorriente\`
         }
     }
     
-    
+    async handleAutocomplete(msg, match) {
+        const chatId = msg.chat.id;
+        const searchText = match && match[1] ? match[1].trim() : '';
+        
+        if (!searchText) {
+            await this.bot.sendMessage(chatId, 
+                '🔍 *Autocompletado de categorías y cuentas*\n\n' +
+                'Escribe: `/autocomplete [texto]`\n' +
+                'Ejemplo: `/autocomplete motor`\n\n' +
+                'También puedes usar # y @ directamente en /add:\n' +
+                '`/add 500 #Motor @Cash`',
+                { parse_mode: 'Markdown' }
+            );
+            return;
+        }
+        
+        try {
+            const [categories, accounts] = await Promise.all([
+                this.wallet.getCategories({ refresh: true }),
+                this.wallet.getAccounts({ refresh: true })
+            ]);
+            
+            const expenseCats = categories.filter(c => 
+                c.group?.id !== 'incomes' && 
+                c.group?.id !== 'income' &&
+                c.name.toLowerCase().includes(searchText.toLowerCase())
+            ).slice(0, 10);
+            
+            const activeAccounts = accounts
+                .filter(a => !a.archived && a.name.toLowerCase().includes(searchText.toLowerCase()))
+                .slice(0, 10);
+            
+            if (expenseCats.length === 0 && activeAccounts.length === 0) {
+                await this.bot.sendMessage(chatId, `🔍 No encontré nada con "${searchText}"`);
+                return;
+            }
+            
+            let message = `🔍 *Resultados para "${searchText}":*\n\n`;
+            
+            if (expenseCats.length > 0) {
+                message += '📂 *Categorías:*\n';
+                expenseCats.forEach(c => {
+                    message += `• #${c.name}\n`;
+                });
+            }
+            
+            if (activeAccounts.length > 0) {
+                message += '\n🏦 *Cuentas:*\n';
+                activeAccounts.forEach(a => {
+                    message += `• @${a.name}\n`;
+                });
+            }
+            
+            message += '\n💡 Copia el nombre con # o @ y úsalo en:\n`/add 500 #Categoría @Cuenta`';
+            
+            await this.bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+            
+        } catch (error) {
+            logger.error('Error en autocomplete:', error);
+            await this.bot.sendMessage(chatId, `❌ Error: ${error.message}`);
+        }
+    }
 }
 
 module.exports = WalletBot;
